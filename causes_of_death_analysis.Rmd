@@ -1,0 +1,648 @@
+---
+title: "Global Causes of Death: Classification and Clustering in R"
+subtitle: Muneef Muhammed
+date: "2024-10-13"
+output:
+  pdf_document: default
+  html_document: default
+---
+Video walkthrough: <https://youtu.be/KlV3De7Bn7I>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Loading all the necessary Libraries
+
+```{r message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(fpc)
+library(gridExtra)
+library(car)
+library(rpart)
+library(caret)
+library(class)
+library(gt)
+library(reshape2)
+library(rpart.plot)
+library(GGally)
+library(caTools)
+library(pROC)
+library(factoextra)
+library(cluster)
+library(knitr)
+library(lime)
+```
+
+### Loading Data :
+
+Provided data 'Countries and Death causes dataset' is used in this project. The data is analysed using the str(), summary() and head() functions.
+
+```{r}
+data <- read.csv("data/countries_and_death_causes.csv", header = T, sep = ',')
+head(data)
+summary(data)
+str(data)
+```
+
+### Initial observations :
+
+The dataset contains multiple columns representing different causes of death (e.g., air pollution, smoking, blood pressure etc) across various countries and regions over time. There are 6840 observations and 31 variables present in the data. All the variables except for Entity and Code are integer values. The data spans from 1990 to 2019 for each country. For better understanding, further analysis is required. It is clear from the summary that there are no negative values present in the data.
+
+## Data Visualization
+
+```{r}
+ggplot(data, aes(x = Outdoor.air.pollution)) + geom_histogram(bins = 20, fill = "blue", color = "black", alpha = 0.7) + ggtitle("Distribution of Deaths due to Outdoor Air Pollution") + theme_minimal()
+
+
+ggplot(data, aes(y = Outdoor.air.pollution)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  ggtitle("Boxplot of Deaths due to Outdoor Air Pollution") +
+  theme_minimal()
+
+selected_countries <- c("Afghanistan", "United States", "India", "China")
+filtered_df <- data %>% filter(Entity %in% selected_countries)
+
+ggplot(filtered_df, aes(x = Year, y = Outdoor.air.pollution, color = Entity)) + geom_line() + geom_point() + ggtitle("Trend of Outdoor Air Pollution Deaths Over Time in Selected Countries") + theme_minimal()
+
+top_countries_pollution <- data %>% filter(Year == 2019) %>% top_n(10, wt = Outdoor.air.pollution)
+
+ggplot(top_countries_pollution, aes(x = reorder(Entity, Outdoor.air.pollution), y = Outdoor.air.pollution)) + geom_bar(stat = "identity") + coord_flip() + ggtitle("Top 10 Countries for Outdoor Air Pollution Deaths in 2019") + theme_minimal()
+```
+
+### Single Variable Plots:
+
+-   Histogram and Boxplot: These visualizations display the distribution of deaths due to outdoor air pollution. The histogram shows that most values are clustered around lower numbers, with a long tail indicating some countries have significantly higher values.
+-   The boxplot confirms the presence of outliers.
+
+### Multi-Variable Plots:
+
+-   Line Plot: Shows the trend of outdoor air pollution deaths over time in selected countries. Notably, China and India exhibit higher numbers of deaths, while the U.S. shows a downward trend over time.
+-   Bar Plot: Displays the top 10 countries with the highest deaths due to outdoor air pollution in 2019.
+
+## Data cleaning :
+
+**1. Checking for Missing or Empty Values:**
+
+-   Used a function to identify missing (NA) or empty values across all columns in the dataset.
+
+**2. Investigating the 'Code' Column:**
+
+-   Found that there were 690 empty values in the 'Code' column. Identified that these empty 'Code' values belonged to entities that were regions or territories rather than countries.
+
+**3. Identifying Non-Country Entities:**
+
+-   Determined that 23 entities without country codes were regions or non-country entities, such as territories and geographical regions.
+
+**4. Filtering Out Non-Country Entities:**
+
+-   Created a list of non-country entities (e.g., American Samoa, Bermuda, Palestine, etc.).
+-   Filtered the dataset to remove these non-country entities and focus only on valid countries.
+
+**5. Analyzing the Remaining Countries:**
+
+-   After filtering, found that 205 entities remained in the dataset. Further refined the dataset by identifying the actual countries and removing entities like 'World' or territories.
+
+**6. Subsetting the Dataset:**
+
+-   Filtered the dataset to retain rows where the 'Entity' column matched the valid countries list.
+
+**7. Removing the 'Code' Column:**
+
+-   The 'Code' column was removed from the filtered dataset as it was no longer required for the analysis.
+
+**8. Numeric Data Extraction**
+
+-   Extracted numeric columns to analyze the causes of death. Applied a function to identify the column with the maximum value for each row.
+
+```{r cars}
+missing_data <- sapply(data, function(x) sum(x == '' | sum(is.na(x))))
+missing_data
+
+missing_colname <- colnames(data)[which(missing_data != 0)]
+missing_countries <- unique(data[data$Code == '', 1])
+unique(missing_countries)
+
+countries <- data[!data$Code == '',1]
+length(unique(countries))
+
+non_countries <- c("American Samoa", "Bermuda", "Cook Islands", "Greenland", 
+                   "Guam", "Northern Mariana Islands", "Puerto Rico", 
+                   "Tokelau", "United States Virgin Islands", "World", "Palestine")
+countries_filtered <- setdiff(countries, non_countries)
+
+filtered_data <- data[data$Entity %in% countries_filtered, ]
+
+filtered_data <- filtered_data %>%
+  dplyr::select(-Code)
+
+numeric_data <- filtered_data[, 3:ncol(filtered_data)]
+
+max_colnames <- apply(numeric_data, 1, function(row) {
+  colnames(numeric_data)[which.max(row)]
+})
+
+table(max_colnames)
+```
+
+## Data Transformation
+
+**Converting 'Year' Column to Factor:**
+
+-   Converted the 'Year' column to a factor to properly categorize the data for analysis.
+
+```{r}
+filtered_data$Year <- factor(filtered_data$Year)
+```
+
+## Data Normalization
+
+### Log Transformation and Z-Score Normalization
+
+```{r}
+log_transformed_data <- filtered_data %>%
+  mutate(across(where(is.numeric), ~ log(. + 1)))
+
+# Log transformation
+p1 <- ggplot(log_transformed_data, aes(x = Air.pollution)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  labs(title = "Log Transformed", x = "Air Pollution", y = "Frequency") +
+  theme_minimal()
+
+filtered_data$Air.pollution.z <- (filtered_data$Air.pollution - mean(filtered_data$Air.pollution, na.rm = TRUE)) / sd(filtered_data$Air.pollution, na.rm = TRUE)
+
+# Z normalisation
+p2 <-ggplot(filtered_data, aes(x = Air.pollution.z)) +
+  geom_histogram(bins = 30, fill = "orange", color = "black") +
+  labs(title = "Z-Score Normalized Air Pollution", x = "Z-Score of Air Pollution", y = "Frequency") + 
+  theme_minimal()
+
+
+grid.arrange(p1, p2, ncol = 2)
+
+```
+
+The figure shows the difference between the Z normalized and log normalized data. From the figure, it is clear that log transformation is more accurate for normalising the data.
+
+## Target Variable Selection
+
+During the data cleaning and analysis process, it was found that **High Systolic Blood Pressure** appeared most frequently as the leading cause of death and was considered a potential target for further analysis
+
+## Feature Selection
+
+In order to select the feature variables, we need to find the correlation between each variable.
+
+```{r}
+corr_matrix <- cor(log_transformed_data[, -c(1,2)])
+corrplot(corr_matrix, method = "color", type = "lower", tl.cex = 0.7)
+
+```
+
+ From the correlation matrix, it is clear that the provided features are strongly correlated with the target variable :
+
+-   Outdoor.air.pollution
+-   Diet.high.in.sodium
+-   Diet.low.in.whole.grains
+-   Alochol.use
+-   Diet.low.in.fruits
+-   Secondhand.smoke
+-   Diet.low.in.nuts.and.seeds
+-   Diet.low.in.Vegetables
+-   Low.physical.activity
+-   Smoking
+-   High.fasting.plasma.glucose
+-   Air.pollution
+-   High.body.mass.index
+-   Drug.use
+-   Low.bone.mineral.density
+
+So the next step is to check for multicollinearity between them.
+
+In this test, features with high VIF value need to be removed. Each time some of the features with high VIF value is being removed and check for the further removal. The threshold value for VIF is considered as 10.
+
+```{r}
+selected_features <- log_transformed_data[, c("High.systolic.blood.pressure", "Outdoor.air.pollution", "Diet.high.in.sodium", "Diet.low.in.whole.grains", "Alochol.use", "Diet.low.in.fruits", "Secondhand.smoke", "Diet.low.in.nuts.and.seeds", "Diet.low.in.Vegetables", "Low.physical.activity", "Smoking", "High.fasting.plasma.glucose", "Air.pollution", "High.body.mass.index", "Drug.use", "Low.bone.mineral.density")]
+
+
+vif_model <- lm(High.systolic.blood.pressure ~ ., data = selected_features)
+vif(vif_model)
+
+selected_features_reduced <- selected_features[, !colnames(selected_features) %in% c("Secondhand.smoke", "Diet.low.in.whole.grains", "Smoking")]
+
+vif_model_reduced <- lm(High.systolic.blood.pressure ~ ., data = selected_features_reduced)
+vif(vif_model_reduced)
+
+selected_features_reduced_2 <- selected_features_reduced[, !colnames(selected_features_reduced) %in% c("High.fasting.plasma.glucose", "High.body.mass.index", "Diet.low.in.fruits", "Low.physical.activity")]
+
+vif_model_reduced_2 <- lm(High.systolic.blood.pressure ~ ., data = selected_features_reduced_2)
+vif(vif_model_reduced_2)
+
+selected_features_reduced_3 <- selected_features_reduced_2[, !colnames(selected_features_reduced_2) %in% c("Outdoor.air.pollution", "Low.bone.mineral.density")]
+
+vif_model_reduced_3 <- lm(High.systolic.blood.pressure ~ ., data = selected_features_reduced_3)
+vif(vif_model_reduced_3)
+
+```
+
+most of the features now have VIF values below the recommended threshold of 10. So these variables are considered as the feature variable.
+
+-   Diet.high.in.sodium
+-   Alochol.use
+-   Diet.low.in.nuts.and.seeds
+-   Diet.low.in.Vegetables
+-   Air.pollution
+-   Drug.use
+
+## Creating NULL model
+
+```{r}
+mean_death_rate <- mean(selected_features_reduced_3$High.systolic.blood.pressure)
+
+selected_features_reduced_3$death_rate_binary <- ifelse(selected_features_reduced_3$High.systolic.blood.pressure > mean_death_rate, 1, 0)
+
+selected_features_reduced_3 <- selected_features_reduced_3 %>%
+    select(-High.systolic.blood.pressure)
+
+null_class <- ifelse(mean(selected_features_reduced_3$death_rate_binary) > 0.9, 1, 0)
+null_predictions <- rep(null_class, nrow(selected_features_reduced_3))
+null_accuracy <- mean(selected_features_reduced_3$death_rate_binary == null_predictions)
+null_accuracy
+```
+
+In the null model, the accuracy is 44.19 %.
+
+## Single Variable Model
+
+```{r}
+set.seed(123)
+
+split <- sample.split(selected_features_reduced_3$death_rate_binary, SplitRatio = 0.7)
+train_data <- subset(selected_features_reduced_3, split == TRUE)
+test_data <- subset(selected_features_reduced_3, split == FALSE)
+
+variables <- variables <- setdiff(colnames(selected_features_reduced_3), "death_rate_binary")
+
+colors <- rainbow(length(variables))
+
+# Initialize a list to store AUC values
+auc_values <- data.frame(Variable = character(), AUC = numeric(), stringsAsFactors = FALSE)
+
+for (i in 1:length(variables)) {
+  var <- variables[i]
+  formula <- as.formula(paste("death_rate_binary ~", var))
+  single_var_model <- glm(formula, family = "binomial", data = train_data)
+  
+  single_var_probabilities <- predict(single_var_model, newdata = test_data, type = "response")
+  
+  single_var_predictions <- ifelse(single_var_probabilities > 0.9, 1, 0)
+
+  # Calculate AUC
+  roc_curve <- roc(test_data$death_rate_binary, single_var_predictions, quiet = TRUE)
+  auc_value <- auc(roc_curve)
+  
+  auc_values <- rbind(auc_values, data.frame(Variable = var, AUC = as.numeric(auc_value)))
+  
+  if (i == 1) {
+    plot(roc_curve, col = colors[i], lwd = 2, main = "ROC Curve Comparison", legacy.axes = TRUE)
+  } else {
+    plot(roc_curve, col = colors[i], lwd = 2, add = TRUE, legacy.axes = TRUE)
+  }
+}
+legend("bottomright", legend = variables, col = colors, lwd = 2, title = "Variables", cex = 0.5)
+
+# Sort AUC
+auc_values <- auc_values[order(-auc_values$AUC), ]
+
+# Display AUC
+kable(auc_values, caption = "AUC Comparison for All Variables")
+
+# Best variable accuracy
+best_variable <- auc_values$Variable[1]
+
+best_model <- glm(as.formula(paste("death_rate_binary ~", best_variable)), family = "binomial", data = train_data)
+
+best_probabilities <- predict(best_model, newdata = test_data, type = "response")
+
+best_predictions <- ifelse(best_probabilities > 0.9, 1, 0)
+
+confusion_matrix <- confusionMatrix(as.factor(best_predictions), as.factor(test_data$death_rate_binary))
+
+print(confusion_matrix)
+```
+
+The table above presents the AUC values for six individual predictor variables used in single-variable logistic regression models to predict the binary outcome of death_rate_binary.
+
+-   Diet.high.in.sodium emerged as the strongest predictor, achieving the highest AUC value of 0.832.
+-   Drug.use followed closely with an AUC of 0.817.
+-   The other variables, such as Diet.low.in.nuts.and.seeds and Diet.low.in.Vegetables, showed moderate predictive power with AUC values around 0.76 to 0.79.
+-   Air.pollution had the lowest AUC of 0.740, indicating comparatively weaker performance.
+
+The accuracy of the best model in single variable model is 81.5 %.
+
+## Multi Variable Model
+
+### Logistic Regression Model
+
+```{r}
+set.seed(123)
+
+# Splitting the data
+split <- sample.split(selected_features_reduced_3$death_rate_binary, SplitRatio = 0.7)
+train_data <- subset(selected_features_reduced_3, split == TRUE)
+test_data <- subset(selected_features_reduced_3, split == FALSE)
+
+# Logistic regression
+logistic_model <- glm(death_rate_binary ~ ., family = "binomial", data = train_data)
+
+# Training Data
+train_probabilities <- predict(logistic_model, newdata = train_data, type = "response")
+
+train_predictions <- ifelse(train_probabilities > 0.9, 1, 0)
+
+train_actual <- train_data$death_rate_binary  
+train_accuracy <- mean(train_predictions == train_actual)
+
+print(paste("Training Accuracy:", round(train_accuracy, 4)))
+
+confusion_matrix_train <- confusionMatrix(as.factor(train_predictions), as.factor(train_actual))
+
+print(confusion_matrix_train)
+
+# Test Data
+logistic_predictions <- predict(logistic_model, newdata = test_data, type = "response")
+logistic_predicted_class <- ifelse(logistic_predictions > 0.9, 1, 0)
+
+confusion_matrix_test <- confusionMatrix(as.factor(logistic_predicted_class), as.factor(test_data$death_rate_binary))
+
+print(confusion_matrix_test)
+
+```
+
+In the logical model, the training accuracy is 87.73 % and test accuracy is 87.92%.
+
+
+
+
+#### Cross Validation
+
+```{r}
+set.seed(123)
+train_control <- trainControl(method="cv", number=10, classProbs = TRUE, summaryFunction = twoClassSummary)
+
+selected_features_reduced_3$death_rate_binary <- factor(selected_features_reduced_3$death_rate_binary, levels = c(0, 1), labels = c("Low", "High"))
+
+cv_model <- train(death_rate_binary ~ ., data=selected_features_reduced_3, method="glm", family="binomial", metric = "Accuracy", trControl=train_control)
+
+print(cv_model)
+
+```
+
+-   The data was split into 10 subsets (folds), where each fold was used once as a validation set while the model was trained on the remaining 9 folds. This process was repeated 10 times to ensure robustness in the model's performance.
+
+-   The high ROC score (0.9856) indicates that the model is very good at discriminating between the "Low" and "High" classes.
+
+-   Sensitivity (90.16%) shows that the model performs well in correctly identifying positive cases (class "High")
+
+-   Specificity (94.24%) shows that the model is also good at correctly identifying negative cases (class "Low")
+
+### Decision Tree
+
+```{r}
+set.seed(123)
+train_index <- createDataPartition(selected_features_reduced_3$death_rate_binary, p = 0.7, list = FALSE)
+train_data <- selected_features_reduced_3[train_index, ]
+test_data <- selected_features_reduced_3[-train_index, ]
+
+# Train a decision tree model
+tree_model <- rpart(death_rate_binary ~ ., data = train_data, method = "class")
+
+train_predictions <- predict(tree_model, newdata = train_data, type = "class")
+
+confusion_matrix_train <- confusionMatrix(as.factor(train_predictions), as.factor(train_data$death_rate_binary))
+
+print(confusion_matrix_train)
+
+# Test Set
+test_predictions <- predict(tree_model, newdata = test_data, type = "class")
+
+# Confusion matrix
+confusion_matrix_test <- confusionMatrix(as.factor(test_predictions), as.factor(test_data$death_rate_binary))
+
+print(confusion_matrix_test)
+
+```
+
+-   The decision tree model performed well on both the training and test sets, with high accuracy (94.63% for training, 93.35% for test) and strong recall for both classes.
+-   The model generalizes well from the training data to the test data, maintaining a balanced accuracy (94.76% for training, 93.50% for test).
+
+#### Cross Validation for Decision Tree
+
+```{r}
+# Cross-Validation for Decision Tree
+control <- trainControl(method = "cv", number = 10)  # 10-fold CV
+
+tree_model_cv <- train(death_rate_binary ~ ., data = train_data, 
+                       method = "rpart", 
+                       trControl = control,
+                       tuneLength = 10)  # tuneLength to explore hyperparameters
+
+# View the tuned model results
+print(tree_model_cv)
+
+```
+
+
+The CART model was tuned using cross-validation, and the optimal cp value selected was 0.002498612, leading to an accuracy of 96.39% and a Kappa score of 0.9268. This indicates that the model performs exceptionally well on this dataset, providing both high accuracy and strong agreement with the actual labels.
+
+
+
+
+### KNN Model
+
+```{r}
+# Train KNN model
+set.seed(123)
+
+knn_model <- train(death_rate_binary ~ ., data = train_data, method = "knn", preProcess = c("center", "scale"))
+
+print(knn_model)
+
+# Predict on the test data
+knn_predictions <- predict(knn_model, newdata = test_data)
+
+# Confusion matrix
+confusion_matrix_knn <- confusionMatrix(as.factor(knn_predictions), as.factor(test_data$death_rate_binary))
+confusion_matrix_knn
+
+```
+
+K-Nearest Neighbors (KNN) performs the best overall, especially in terms of accuracy, precision, recall, and F1-score. This makes it the strongest model for classification.
+
+
+#### Cross Validation for KNN
+
+```{r}
+# Cross-Validation for KNN
+control <- trainControl(method = "cv", number = 10)  # 10-fold CV
+
+knn_model_cv <- train(death_rate_binary ~ ., data = train_data, 
+                      method = "knn", 
+                      tuneLength = 10,  # to explore different values of k
+                      trControl = control)
+
+# View the tuned model results
+print(knn_model_cv)
+
+```
+
+
+The KNN model was optimized using 10-fold cross-validation, and the optimal number of neighbors was determined to be k = 5, resulting in an accuracy of 98.55% and a Kappa score of 0.9707. These results indicate that the KNN model is highly accurate and has excellent agreement with the true labels.
+
+### ROC Curve
+```{r}
+glm_prob <- predict(logistic_model, newdata = test_data, type = "response")
+
+tree_prob <- predict(tree_model, newdata = test_data, type = "prob")[, 2]  # Probability for "High"
+
+knn_prob <- predict(knn_model, newdata = test_data, type = "prob")[, 2]  # Probability for "High"
+
+roc_glm <- roc(test_data$death_rate_binary, glm_prob, quiet = TRUE)
+
+roc_tree <- roc(test_data$death_rate_binary, tree_prob, quiet = TRUE)
+
+roc_knn <- roc(test_data$death_rate_binary, knn_prob, quiet = TRUE)
+
+plot(roc_glm, col = "blue", lwd = 2, main = "ROC Curve Comparison", legacy.axes = TRUE)
+plot(roc_tree, col = "red", lwd = 2, add = TRUE)
+plot(roc_knn, col = "green", lwd = 2, add = TRUE)
+
+legend("bottomright", legend = c("Logistic Regression", "Decision Tree", "KNN"), col = c("blue", "red", "green"), lwd = 2)
+
+auc_glm <- auc(roc_glm)
+cat("AUC for Logistic Regression:", auc_glm, "")
+
+auc_tree <- auc(roc_tree)
+cat("AUC for Decision Tree:", auc_tree, "")
+
+auc_knn <- auc(roc_knn)
+cat("AUC for KNN:", auc_knn, "")
+
+```
+
+### Feature Set 2 using LIME
+```{r}
+train_features <- train_data[, -which(names(train_data) == "death_rate_binary")]
+
+explainer_sample <- train_features[1:4, ]
+
+explainer <- lime(train_features, knn_model)
+
+explanation <- lime::explain(explainer_sample, explainer, n_labels = 1, n_features = 5)
+print(explanation)
+
+plot_features(explanation)
+
+top_features <- explanation %>%
+  group_by(feature) %>%
+  summarise(mean_importance = mean(abs(feature_weight))) %>%
+  arrange(desc(mean_importance))
+
+print(top_features)
+
+feature_set_2 <- top_features$feature[1:5]
+
+print(feature_set_2)
+
+```
+
+
+```{r}
+top_features <- explanation %>%
+  group_by(feature) %>%
+  summarise(mean_importance = mean(abs(feature_weight))) %>%
+  arrange(desc(mean_importance))
+
+print(top_features)
+
+top_n <- 5
+feature_set_2 <- top_features$feature[1:top_n]
+
+train_features_set_2 <- train_data[, feature_set_2]
+train_features_set_2 <- cbind(train_features_set_2, death_rate_binary = train_data$death_rate_binary)
+
+test_features_set_2 <- test_data[, feature_set_2]
+test_features_set_2 <- cbind(test_features_set_2, death_rate_binary = test_data$death_rate_binary)
+
+set.seed(123)
+knn_model_set_2 <- train(death_rate_binary ~ ., 
+                         data = train_features_set_2, 
+                         method = "knn", 
+                         trControl = trainControl(method = "cv", number = 10))
+knn_predictions_set_2 <- predict(knn_model_set_2, newdata = test_features_set_2)
+
+true_labels <- as.factor(test_features_set_2$death_rate_binary)
+
+confusion_matrix <- confusionMatrix(knn_predictions_set_2, true_labels)
+
+print(confusion_matrix)
+```
+
+
+The KNN model using the newly selected Feature Set 2 based on LIME explanations achieved an accuracy of 97.88%, slightly outperforming the original feature set model, which had an accuracy of 97.77%. This indicates that using the top features identified by LIME helped refine the model and achieve a marginal improvement in classification performance.
+
+## Clustering
+
+```{r}
+cluster_data <- numeric_data
+cluster_data <- log(cluster_data + 1) 
+cluster_data_scaled <- scale(cluster_data)
+d<-dist(cluster_data_scaled)###Calculate Euclidean distance
+fit1<-hclust(d,method = "average")
+plot(fit1, hang = -1, cex = 0.6)
+
+```
+```{r}
+library(NbClust)
+nc <- NbClust(cluster_data_scaled[1:3000, ], distance = "euclidean", min.nc = 2, max.nc = 7, method = "average")
+table(nc$Best.n[1,])
+barplot(table(nc$Best.n[1,]),xlab = "No. of cluster")
+
+```
+
+From the barchart, it is clear that the best number of cluster is 3
+
+
+```{r}
+set.seed(123)
+
+fviz_nbclust(cluster_data_scaled, kmeans, method = "wss", nstart = 25) +
+  geom_vline(xintercept = 3, linetype = 2) + labs(subtitle = "Elbow method")
+
+# K-Means clustering with k = 3
+kmeans_model <- kmeans(cluster_data_scaled, centers = 3, nstart = 25)
+
+fviz_cluster(kmeans_model, data = cluster_data_scaled, geom = "point", ellipse.type = "convex", ggtheme = theme_minimal())
+
+```
+
+-   The Elbow Plot confirms that 3 clusters is the optimal number of clusters, as this is where the WSS significantly flattens.
+
+-   The Cluster Plot visualizes how the data is divided into three distinct clusters, with clear separation between the clusters in the reduced dimensional space.
+
+## Conclusion
+
+In this project, three main areas were explored: data preparation and exploration, classification, and clustering.
+
+Data Preparation and Exploration: The dataset used for this project contained various causes of death across countries over several years. The initial data cleaning involved removing irrelevant columns, handling missing data, and standardizing the dataset using techniques such as log transformation and Z-score normalization. This ensured that the dataset was properly formatted for analysis, facilitating more accurate results in subsequent analyses.
+
+Classification: Classification was a key component, where different algorithms such as logistic regression, decision tree and K-Nearest Neighbors (KNN),  were applied using a refined set of features selected through correlation matrix and LIME. The KNN model with LIME based features achieved an accuracy of 97.88%, which was the best comparing to other model. This demonstrates the importance of feature selection in enhancing model performance and classification accuracy.
+
+Clustering: In the clustering analysis, methods such as K-means were utilized to group countries based on the standardized features. The NbClust package and elbow method were used to identify the optimal number of clusters, which turned out to be three. This clustering approach helped to identify patterns in how different countries are affected by various causes of death.
+
+## Reference
+
+Chatgpt. ChatGPT. (n.d.). <https://openai.com/chatgpt>
+
+## Thank You !
